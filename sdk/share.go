@@ -48,6 +48,35 @@ type ShareCatalog struct {
 
 const catalogKeyPrefix = "vx6share/catalog/"
 
+func (c *Client) DHTPut(ctx context.Context, key string, payload []byte) error {
+	cfg, err := c.store.Load()
+	if err != nil {
+		return err
+	}
+	client, err := c.newDHTClient(cfg)
+	if err != nil {
+		return err
+	}
+	_, err = client.MaintainReplicas(ctx, key, string(payload))
+	return err
+}
+
+func (c *Client) DHTGet(ctx context.Context, key string) ([]byte, error) {
+	cfg, err := c.store.Load()
+	if err != nil {
+		return nil, err
+	}
+	client, err := c.newDHTClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	value, err := client.RecursiveFindValue(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(value), nil
+}
+
 func (c *Client) BuildInvite() (PeerInvite, string, error) {
 	cfg, err := c.store.Load()
 	if err != nil {
