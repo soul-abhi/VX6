@@ -1,11 +1,19 @@
 #include "vx6backend.h"
 
-#include <QCoreApplication>
+#include <QApplication>
 #include <QDir>
+#include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
+#include <QStringList>
+
+#include <chrono>
+#include <thread>
 
 VX6Backend::VX6Backend(QString vx6Binary, QString configPath, QObject *parent)
     : QObject(parent), m_vx6Binary(std::move(vx6Binary)), m_configPath(std::move(configPath))
@@ -89,6 +97,95 @@ QString VX6Backend::resolveConfigPath() const
     return QStringLiteral("config.json");
 }
 
+bool VX6Backend::vx6BinaryExists() const
+{
+    const QString binPath = resolveBinaryPath();
+    return QFileInfo::exists(binPath) && QFileInfo(binPath).isExecutable();
+}
+
+bool VX6Backend::waitForProcessFinished(QProcess &proc, int msecs) const
+{
+    const auto start = std::chrono::steady_clock::now();
+    const auto timeout = std::chrono::milliseconds(msecs);
+    
+    while (proc.state() == QProcess::Running) {
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        if (elapsed > timeout) {
+            return false;  // Timeout
+        }
+        
+        // Process UI events to keep interface responsive
+        QApplication::processEvents(QEventLoop::AllEvents, 100);
+        
+        // Small sleep to avoid busy waiting
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    
+    return true;  // Process finished normally
+}
+
+QString VX6Backend::ensureVx6Binary()
+{
+    if (vx6BinaryExists()) {
+        emit logLine(QStringLiteral("vx6 binary already available"));
+        return QStringLiteral("vx6 binary already available");
+    }
+
+    emit logLine(QStringLiteral("vx6 binary not found, building from source..."));
+
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QDir dir(appDir);
+    dir.cdUp();  // qt/build -> qt
+    dir.cdUp();  // qt -> browser
+    dir.cdUp();  // browser -> project root
+    const QString projectRoot = dir.path();
+    
+    const QString buildCmd = QStringLiteral("go build -o %1 ./cmd/vx6")
+        .arg(QDir(appDir).filePath("vx6"));
+
+    QProcess buildProc;
+    buildProc.setWorkingDirectory(projectRoot);
+    buildProc.setProgram(QStringLiteral("sh"));
+    buildProc.setArguments({QStringLiteral("-c"), buildCmd});
+
+    emit logLine(QStringLiteral("building vx6 in: %1").arg(projectRoot));
+    buildProc.start();
+
+    if (!buildProc.waitForStarted(5000)) {
+        const QString msg = QStringLiteral("failed to start build process");
+        emit logLine(msg);
+        return msg;
+    }
+
+    if (!buildProc.waitForFinished(300000)) {  // 5 minute timeout
+        buildProc.kill();
+        buildProc.waitForFinished(2000);
+        const QString msg = QStringLiteral("vx6 build timed out");
+        emit logLine(msg);
+        return msg;
+    }
+
+    const QString buildOutput = QString::fromUtf8(buildProc.readAllStandardOutput());
+    const QString buildError = QString::fromUtf8(buildProc.readAllStandardError());
+    const bool buildSuccess = buildProc.exitStatus() == QProcess::NormalExit && buildProc.exitCode() == 0;
+
+    if (!buildError.trimmed().isEmpty()) {
+        emit logLine(buildError);
+    }
+    if (!buildOutput.trimmed().isEmpty()) {
+        emit logLine(buildOutput);
+    }
+
+    if (buildSuccess && vx6BinaryExists()) {
+        emit logLine(QStringLiteral("vx6 binary built successfully"));
+        return QStringLiteral("vx6 binary built successfully");
+    }
+
+    const QString msg = QStringLiteral("failed to build vx6 binary (exit code %1)").arg(buildProc.exitCode());
+    emit logLine(msg);
+    return msg;
+}
+
 QString VX6Backend::runVX6(const QStringList &args, bool *ok) const
 {
     QProcess proc;
@@ -110,7 +207,9 @@ QString VX6Backend::runVX6(const QStringList &args, bool *ok) const
         emit logLine(msg);
         return msg;
     }
-    if (!proc.waitForFinished(120000)) {
+    
+    // Use responsive wait to keep UI responsive during long operations
+    if (!waitForProcessFinished(proc, 120000)) {
         proc.kill();
         proc.waitForFinished(2000);
         if (ok) {
@@ -295,14 +394,13 @@ QString VX6Backend::homePageHtml() const
     cards += dashboardCard("vx6://dht", "DHT", "Open lookup, replication, and resolver health.", "#23c18f");
     cards += dashboardCard("vx6://registry", "Registry", "Inspect the discovery registry snapshot.", "#ffd166");
     cards += dashboardCard("vx6://services", "Services", "View local configured services.", "#f78c6b");
-    cards += dashboardCard("vx6://peers", "Peers", "View local peers and sync targets.", "#8f7cff");
-    cards += dashboardCard("vx6://identity", "Identity", "Show the node key and identity details.", "#4dd0e1");
-    cards += dashboardCard("vx6://permissions", "Permissions", "First-run firewall/admin guidance.", "#ff7eb6");
-    cards += dashboardCard("vx6://service/example", "Service Lookup", "Look up a service by name.", "#9bde7b");
-    cards += dashboardCard("vx6://node/example", "Node Lookup", "Look up a node by name.", "#ffb86b");
-    cards += dashboardCard("vx6://key/example", "Raw Key", "Inspect a raw DHT key.", "#c792ea");
 
     QString body;
+    body += QStringLiteral(
+        "<div class=\"panel\" style=\"margin-top:18px;\">"
+        "<div class=\"notice ok\"><strong>Control drawer:</strong> Use the left sliding panel for copy, rename, lookup, and service hosting. "
+        "The home screen stays focused on overview.</div>"
+        "</div>");
     body += QStringLiteral("<div class=\"grid\">%1</div>").arg(cards);
     body += QStringLiteral("<div class=\"section\"><h2>Live Status Snapshot</h2>%1</div>").arg(commandBlock(status));
     body += QStringLiteral("<div class=\"section\"><h2>DHT Snapshot</h2>%1</div>").arg(commandBlock(dht));
@@ -310,7 +408,7 @@ QString VX6Backend::homePageHtml() const
     body += QStringLiteral(
         "<div class=\"section\"><h2>Shortcuts</h2>"
         "<div class=\"hint\">Use <code>vx6://status</code>, <code>vx6://dht</code>, <code>vx6://services</code>, "
-        "<code>vx6://peers</code>, and <code>vx6://identity</code> as your default home actions.</div>"
+        "<code>vx6://peers</code>, and <code>vx6://identity</code> as your overview pages. Operational actions live in the left drawer.</div>"
         "</div>");
 
     return makePageShell("VX6 Home", "One system. One key. One VX6 runtime.", body, "#6ea8ff");
@@ -393,6 +491,52 @@ QString VX6Backend::lookupPageHtml(const QString &title, const QStringList &args
     return makePageShell(title, subtitle, body, "#c792ea");
 }
 
+QString VX6Backend::currentNodeName() const
+{
+    return statusValue(QStringLiteral("node_name"));
+}
+
+QString VX6Backend::currentNodeID() const
+{
+    bool ok = false;
+    const QString output = runVX6(QStringList{"identity"}, &ok);
+    for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
+        const int tab = line.indexOf('\t');
+        if (tab <= 0) {
+            continue;
+        }
+        const QString key = line.left(tab).trimmed();
+        const QString value = line.mid(tab + 1).trimmed();
+        if (key == "node_id") {
+            return value;
+        }
+    }
+    return QString();
+}
+
+QString VX6Backend::currentAdvertiseAddr() const
+{
+    return statusValue(QStringLiteral("advertise_addr"));
+}
+
+QString VX6Backend::statusValue(const QString &key) const
+{
+    bool ok = false;
+    const QString output = runVX6(QStringList{"status"}, &ok);
+    for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
+        const int tab = line.indexOf('\t');
+        if (tab <= 0) {
+            continue;
+        }
+        const QString foundKey = line.left(tab).trimmed();
+        const QString value = line.mid(tab + 1).trimmed();
+        if (foundKey == key) {
+            return value;
+        }
+    }
+    return QString();
+}
+
 bool VX6Backend::nodeRunning() const
 {
     return m_nodeProcess.state() != QProcess::NotRunning;
@@ -435,6 +579,275 @@ QString VX6Backend::stopNode()
     }
     updateNodeState();
     return QStringLiteral("vx6 node stopped");
+}
+
+QString VX6Backend::renameNode(const QString &name)
+{
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        return QStringLiteral("node rename failed: empty name");
+    }
+    bool ok = false;
+    const QString output = runVX6(QStringList{"identity", "rename", "--name", trimmed, "--wait", "1m"}, &ok);
+    if (ok) {
+        const QString reloadOut = runVX6(QStringList{"reload"}, &ok);
+        return output + QStringLiteral("\n") + reloadOut;
+    }
+    return output;
+}
+
+QString VX6Backend::initializeNode(const QString &name)
+{
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        return QStringLiteral("node init failed: empty name");
+    }
+    bool ok = false;
+    
+    // Step 1: Stop the running node
+    if (nodeRunning()) {
+        emit logLine(QStringLiteral("stopping running node..."));
+        m_nodeProcess.terminate();
+        if (!m_nodeProcess.waitForFinished(3000)) {
+            m_nodeProcess.kill();
+            m_nodeProcess.waitForFinished(2000);
+        }
+        updateNodeState();
+        emit logLine(QStringLiteral("node stopped"));
+    }
+    
+    // Step 2: Run init
+    emit logLine(QStringLiteral("initializing new node with name: %1").arg(trimmed));
+    emit logLine(QStringLiteral("generating keys... this may take a moment"));
+    
+    const QString initOut = runVX6(
+        QStringList{"init", "--name", trimmed, "--listen", "[::]:4242"},
+        &ok);
+    
+    if (!ok) {
+        emit logLine(QStringLiteral("initialization failed"));
+        emit logLine(initOut);
+        return initOut;
+    }
+    
+    // Step 3: Start the new node
+    emit logLine(QStringLiteral("node initialized, starting new node..."));
+    const QString startResult = startNode();
+    emit logLine(startResult);
+    
+    return QStringLiteral("node reinitialized successfully");
+}
+
+QString VX6Backend::connectService(const QString &target)
+{
+    const QString trimmed = target.trimmed();
+    if (trimmed.isEmpty()) {
+        return QStringLiteral("connect failed: empty target");
+    }
+    bool ok = false;
+    emit logLine(QStringLiteral("connecting to: %1").arg(trimmed));
+    const QString output = runVX6(QStringList{"connect", "--service", trimmed, "--listen", "127.0.0.1:9999"}, &ok);
+    if (ok) {
+        return QStringLiteral("Connected to %1 on 127.0.0.1:9999\n%2").arg(trimmed, output);
+    }
+    return output;
+}
+
+QString VX6Backend::hostService(const QString &serviceName, int port)
+{
+    const QString trimmed = serviceName.trimmed();
+    if (trimmed.isEmpty() || port <= 0 || port > 65535) {
+        return QStringLiteral("service host failed: invalid name or port");
+    }
+    bool ok = false;
+    const QString target = QStringLiteral("127.0.0.1:%1").arg(port);
+    const QString output = runVX6(QStringList{"service", "add", "--name", trimmed, "--target", target}, &ok);
+    if (ok) {
+        const QString reloadOut = runVX6(QStringList{"reload"}, &ok);
+        return output + QStringLiteral("\n") + reloadOut;
+    }
+    return output;
+}
+
+QString VX6Backend::sendFile(const QString &filePath, const QString &target, bool proxy)
+{
+    const QString trimmedFile = filePath.trimmed();
+    const QString trimmedTarget = target.trimmed();
+    if (trimmedFile.isEmpty()) {
+        return QStringLiteral("send file failed: empty file path");
+    }
+    if (trimmedTarget.isEmpty()) {
+        return QStringLiteral("send file failed: empty target");
+    }
+    if (!QFileInfo(trimmedFile).exists()) {
+        return QStringLiteral("send file failed: file does not exist");
+    }
+
+    QStringList args = {QStringLiteral("send"), QStringLiteral("--file"), trimmedFile};
+    if (trimmedTarget.contains(QLatin1Char(':'))) {
+        args << QStringLiteral("--addr") << trimmedTarget;
+    } else {
+        args << QStringLiteral("--to") << trimmedTarget;
+    }
+    if (proxy) {
+        args << QStringLiteral("--proxy");
+    }
+
+    bool ok = false;
+    const QString result = runVX6(args, &ok);
+    if (ok) {
+        return QStringLiteral("file send complete:\n%1").arg(result.trimmed());
+    }
+    return QStringLiteral("file send failed:\n%1").arg(result.trimmed());
+}
+
+QString VX6Backend::receiveStatus() const
+{
+    bool ok = false;
+    const QString output = runVX6(QStringList{QStringLiteral("receive"), QStringLiteral("status")}, &ok);
+    if (ok) {
+        return QStringLiteral("receive status:\n%1").arg(output.trimmed());
+    }
+    return QStringLiteral("receive status failed:\n%1").arg(output.trimmed());
+}
+
+bool VX6Backend::receiveEnabled() const
+{
+    bool ok = false;
+    const QString output = runVX6(QStringList{QStringLiteral("receive"), QStringLiteral("status")}, &ok);
+    if (!ok) {
+        return false;
+    }
+    for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
+        if (line.startsWith(QStringLiteral("file_receive_mode\t"))) {
+            const QString mode = line.section('\t', 1, 1).trimmed();
+            return mode == QStringLiteral("OPEN") || mode == QStringLiteral("TRUSTED");
+        }
+    }
+    return false;
+}
+
+QString VX6Backend::toggleReceive(bool enable)
+{
+    QStringList args;
+    if (enable) {
+        args = {QStringLiteral("receive"), QStringLiteral("allow"), QStringLiteral("--all")};
+    } else {
+        args = {QStringLiteral("receive"), QStringLiteral("disable")};
+    }
+    bool ok = false;
+    const QString output = runVX6(args, &ok);
+    if (ok) {
+        return QStringLiteral("receive %1 successfully:\n%2").arg(enable ? QStringLiteral("enabled") : QStringLiteral("disabled"), output.trimmed());
+    }
+    return QStringLiteral("receive %1 failed:\n%2").arg(enable ? QStringLiteral("enable") : QStringLiteral("disable"), output.trimmed());
+}
+
+QString VX6Backend::currentDownloadPath() const
+{
+    const QString cfgPath = resolveConfigPath();
+    QFile configFile(cfgPath);
+    if (configFile.open(QIODevice::ReadOnly)) {
+        const QByteArray data = configFile.readAll();
+        configFile.close();
+        const QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (!doc.isNull() && doc.isObject()) {
+            const QJsonObject root = doc.object();
+            if (root.contains(QStringLiteral("node")) && root.value(QStringLiteral("node")).isObject()) {
+                const QJsonObject nodeObj = root.value(QStringLiteral("node")).toObject();
+                const QString downloadDir = nodeObj.value(QStringLiteral("download_dir")).toString().trimmed();
+                if (!downloadDir.isEmpty()) {
+                    const QDir dir(downloadDir);
+                    if (dir.isAbsolute()) {
+                        return QDir::cleanPath(downloadDir);
+                    }
+                    return QDir(QFileInfo(cfgPath).absolutePath()).absoluteFilePath(downloadDir);
+                }
+            }
+        }
+    }
+
+    const QString defaultDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (!defaultDir.isEmpty()) {
+        return QDir::cleanPath(defaultDir);
+    }
+    return QDir::homePath() + QDir::separator() + QStringLiteral("Downloads");
+}
+
+QString VX6Backend::downloadedFilesHtml(const QString &downloadDir) const
+{
+    const QDir dir(downloadDir);
+    if (!dir.exists()) {
+        return QStringLiteral("<div class=\"output\">No download directory found: %1</div>").arg(downloadDir.toHtmlEscaped());
+    }
+
+    const QFileInfoList dirs = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    QStringList sections;
+    for (const QFileInfo &folder : dirs) {
+        if (!folder.fileName().endsWith(QStringLiteral("_vx6"))) {
+            continue;
+        }
+        const QDir subdir(folder.filePath());
+        const QFileInfoList files = subdir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+        if (files.isEmpty()) {
+            sections.append(QStringLiteral("<div class=\"hint\"><strong>%1</strong> — no received files yet.</div>").arg(folder.fileName().toHtmlEscaped()));
+            continue;
+        }
+        QStringList rows;
+        for (const QFileInfo &info : files) {
+            rows.append(QStringLiteral("<li><strong>%1</strong> — %2</li>")
+                .arg(info.fileName().toHtmlEscaped(), QString::number(info.size())));
+        }
+        sections.append(QStringLiteral("<div class=\"hint\"><strong>%1</strong></div><ul style=\"margin:0 0 16px 20px;\">%2</ul>")
+            .arg(folder.fileName().toHtmlEscaped(), rows.join(QString())));
+    }
+
+    if (sections.isEmpty()) {
+        return QStringLiteral("<div class=\"output\">No sender-specific received folders found. Received files are stored in sender subdirectories ending with <code>_vx6</code>.</div>");
+    }
+
+    return QStringLiteral("<div class=\"output\">%1</div>").arg(sections.join(QString()));
+}
+
+QString VX6Backend::filesPageHtml() const
+{
+    const QString status = receiveStatus();
+    const QString configPath = resolveConfigPath();
+    const QString downloadDir = currentDownloadPath();
+    const QString filesHtml = downloadedFilesHtml(downloadDir);
+    const QString body = QStringLiteral(
+        "<div class=\"hint\">This page shows file receive/download status and quick file transfer actions.</div>"
+        "<div class=\"section\"><h2>Receive Status</h2>%1</div>"
+        "<div class=\"section\"><h2>Config Path</h2>%2</div>"
+        "<div class=\"section\"><h2>Download Directory</h2>%3</div>"
+        "<div class=\"section\"><h2>Downloaded Files</h2>%4</div>")
+        .arg(commandBlock(status), commandBlock(configPath), commandBlock(downloadDir), filesHtml);
+    return makePageShell("VX6 Files", "File transfer and receive status", body, "#ff9f43");
+}
+
+QString VX6Backend::stopHostedService(const QString &serviceName)
+{
+    const QString trimmed = serviceName.trimmed();
+    if (trimmed.isEmpty()) {
+        return QStringLiteral("service stop failed: empty name");
+    }
+    bool ok = false;
+    const QString output = runVX6(QStringList{"service", "remove", "--name", trimmed}, &ok);
+    if (ok) {
+        const QString reloadOut = runVX6(QStringList{"reload"}, &ok);
+        return output + QStringLiteral("\n") + reloadOut;
+    }
+    return output;
+}
+
+QString VX6Backend::lookupRaw(const QStringList &args, const QString &label) const
+{
+    bool ok = false;
+    const QString output = runVX6(args, &ok);
+    if (ok) {
+        return label.isEmpty() ? output : QStringLiteral("[%1]\n%2").arg(label, output);
+    }
+    return output;
 }
 
 void VX6Backend::appendProcessOutput()

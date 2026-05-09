@@ -4,7 +4,13 @@
 #include "vx6schemehandler.h"
 
 #include <QAction>
+#include <QApplication>
+#include <QClipboard>
 #include <QDockWidget>
+#include <QFileDialog>
+#include <QScrollArea>
+#include <QFormLayout>
+#include <QGroupBox>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
@@ -14,6 +20,7 @@
 #include <QTabWidget>
 #include <QListWidgetItem>
 #include <QTextEdit>
+#include <QSpinBox>
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -29,11 +36,13 @@
 #include <QGraphicsDropShadowEffect>
 #include <QSpacerItem>
 #include <QTabBar>
+#include <QSizePolicy>
 #include <QStylePainter>
 #include <QPainter>
 #include <QPainterPath>
 #include <QMouseEvent>
 #include <QEnterEvent>
+#include <utility>
 
 
 namespace
@@ -218,6 +227,9 @@ BrowserWindow::BrowserWindow(const QString &vx6Binary,
       m_backend(new VX6Backend(vx6Binary, configPath, this)),
       m_profile(new QWebEngineProfile("vx6-browser", this)),
       m_tabs(nullptr), m_address(nullptr),
+      m_controlDock(nullptr), m_ipv6Field(nullptr), m_nodeNameField(nullptr), m_nodeIdField(nullptr),
+      m_initNodeNameField(nullptr), m_connectServiceField(nullptr),
+      m_renameField(nullptr), m_lookupField(nullptr), m_hostNameField(nullptr), m_hostPortField(nullptr), m_lookupResult(nullptr),
       m_logView(nullptr), m_logDock(nullptr), m_shortcuts(nullptr)
 {
     setWindowTitle("VX6");
@@ -236,9 +248,20 @@ BrowserWindow::BrowserWindow(const QString &vx6Binary,
 
     buildUi();
     buildToolbar();
+    buildControlDock();
     buildDock();
     registerBrowserCallbacks();
     maybeShowPermissionPrompt();
+    
+    // Ensure vx6 binary exists (build if needed)
+    appendLog("Initializing VX6...");
+    appendLog(m_backend->ensureVx6Binary());
+    
+    // Auto-start the node on browser launch
+    if (!m_backend->nodeRunning()) {
+        appendLog(m_backend->startNode());
+    }
+    
     openHome();
 }
 
@@ -423,6 +446,240 @@ void BrowserWindow::buildToolbar()
     connect(m_address, &QLineEdit::returnPressed, this, &BrowserWindow::openAddress);
 }
 
+// left control dock
+void BrowserWindow::buildControlDock()
+{
+    m_controlDock = new QDockWidget(this);
+    m_controlDock->setWindowTitle("Control");
+    m_controlDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    m_controlDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
+    m_controlDock->setMinimumWidth(360);
+    m_controlDock->setMaximumWidth(460);
+
+    m_controlDock->setStyleSheet(
+        "QDockWidget { color: #e8eaf0; font-size: 12px; font-weight: 600; }"
+        "QDockWidget::title { background: #0e1118; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 8px 12px; }"
+        "QDockWidget::close-button { background: transparent; border: none; image: none; }");
+
+    auto *scrollArea = new QScrollArea(m_controlDock);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scrollArea->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+
+    auto *root = new QWidget();
+    root->setStyleSheet("QWidget { background: #12151a; color: #e8eaf0; }");
+
+    auto *outer = new QVBoxLayout(root);
+    outer->setContentsMargins(14, 14, 14, 14);
+    outer->setSpacing(12);
+
+    auto makeFrame = [&](const QString &title) {
+        auto *frame = new QFrame(root);
+        frame->setStyleSheet(
+            "QFrame { background: #151b28; border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; }");
+        auto *lay = new QVBoxLayout(frame);
+        lay->setContentsMargins(14, 12, 14, 12);
+        lay->setSpacing(8);
+        auto *lbl = new QLabel(title, frame);
+        lbl->setStyleSheet("QLabel { color: #9ca7bd; font-size: 10px; font-weight: 800; letter-spacing: 1.4px; }");
+        lay->addWidget(lbl);
+        return std::pair<QFrame *, QVBoxLayout *>(frame, lay);
+    };
+
+    auto [netFrame, netLay] = makeFrame("NETWORK");
+    auto *ipv6Row = new QWidget(netFrame);
+    auto *ipv6RowLay = new QHBoxLayout(ipv6Row);
+    ipv6RowLay->setContentsMargins(0, 0, 0, 0);
+    ipv6RowLay->setSpacing(8);
+    m_ipv6Field = new QLineEdit(ipv6Row);
+    m_ipv6Field->setReadOnly(true);
+    m_ipv6Field->setPlaceholderText("Current IPv6 / advertise address");
+    m_ipv6Field->setStyleSheet(
+        "QLineEdit { background: #0e1118; border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 8px 10px; color: #e8eaf0; }");
+    auto *copyIpv6 = makeSideBtn("Copy", ipv6Row);
+    ipv6RowLay->addWidget(m_ipv6Field, 1);
+    ipv6RowLay->addWidget(copyIpv6);
+    netLay->addWidget(ipv6Row);
+
+    m_nodeNameField = new QLineEdit(netFrame);
+    m_nodeNameField->setReadOnly(true);
+    m_nodeNameField->setPlaceholderText("Node name");
+    m_nodeNameField->setStyleSheet(m_ipv6Field->styleSheet());
+    netLay->addWidget(m_nodeNameField);
+
+    m_nodeIdField = new QLineEdit(netFrame);
+    m_nodeIdField->setReadOnly(true);
+    m_nodeIdField->setPlaceholderText("Node ID");
+    m_nodeIdField->setStyleSheet(m_ipv6Field->styleSheet());
+    netLay->addWidget(m_nodeIdField);
+
+    auto *refreshPanel = makeSideBtn("↺  Refresh panel", netFrame);
+    netLay->addWidget(refreshPanel);
+    outer->addWidget(netFrame);
+
+    auto [initFrame, initLay] = makeFrame("INITIALIZE NODE");
+    m_initNodeNameField = new QLineEdit(initFrame);
+    m_initNodeNameField->setPlaceholderText("New node name");
+    m_initNodeNameField->setStyleSheet(m_ipv6Field->styleSheet());
+    initLay->addWidget(m_initNodeNameField);
+    auto *initBtn = makeSideBtn("Init New Node", initFrame);
+    auto *initHint = new QLabel("Creates a new node with fresh keys. This will stop the current node.", initFrame);
+    initHint->setWordWrap(true);
+    initHint->setStyleSheet("QLabel { color: #7f889b; font-size: 11px; }");
+    initLay->addWidget(initBtn);
+    initLay->addWidget(initHint);
+    outer->addWidget(initFrame);
+
+    auto [connectFrame, connectLay] = makeFrame("CONNECT");
+    m_connectServiceField = new QLineEdit(connectFrame);
+    m_connectServiceField->setPlaceholderText("Service name or address");
+    m_connectServiceField->setStyleSheet(m_ipv6Field->styleSheet());
+    connectLay->addWidget(m_connectServiceField);
+    auto *connectBtn = makeSideBtn("Connect", connectFrame);
+    auto *connectHint = new QLabel("Connect to a VX6 service by name or address.", connectFrame);
+    connectHint->setWordWrap(true);
+    connectHint->setStyleSheet("QLabel { color: #7f889b; font-size: 11px; }");
+    connectLay->addWidget(connectBtn);
+    connectLay->addWidget(connectHint);
+    outer->addWidget(connectFrame);
+
+    auto [fileFrame, fileLay] = makeFrame("FILE TRANSFER");
+    m_sendFileField = new QLineEdit(fileFrame);
+    m_sendFileField->setPlaceholderText("File path e.g. /home/user/Downloads/sample.txt");
+    m_sendFileField->setStyleSheet(m_ipv6Field->styleSheet());
+    fileLay->addWidget(m_sendFileField);
+    auto *fileRow = new QWidget(fileFrame);
+    auto *fileRowLay = new QHBoxLayout(fileRow);
+    fileRowLay->setContentsMargins(0, 0, 0, 0);
+    fileRowLay->setSpacing(8);
+    auto *browseBtn = makeSideBtn("Browse", fileRow);
+    auto *sendBtn = makeSideBtn("Send File", fileRow);
+    fileRowLay->addWidget(browseBtn);
+    fileRowLay->addWidget(sendBtn);
+    fileLay->addWidget(fileRow);
+    m_sendTargetField = new QLineEdit(fileFrame);
+    m_sendTargetField->setPlaceholderText("Receiver name or address e.g. alice or [ipv6]:4242");
+    m_sendTargetField->setStyleSheet(m_ipv6Field->styleSheet());
+    fileLay->addWidget(m_sendTargetField);
+    auto *receiveStatusBtn = makeSideBtn("Receive Status", fileFrame);
+    fileLay->addWidget(receiveStatusBtn);
+    m_toggleReceiveBtn = makeSideBtn("Toggle Receive", fileFrame);
+    fileLay->addWidget(m_toggleReceiveBtn);
+    auto *fileHint = new QLabel("Use a local file path and target name or address. For direct send, use [ipv6]:4242.", fileFrame);
+    fileHint->setWordWrap(true);
+    fileHint->setStyleSheet("QLabel { color: #7f889b; font-size: 11px; }");
+    fileLay->addWidget(fileHint);
+    outer->addWidget(fileFrame);
+
+    auto [renameFrame, renameLay] = makeFrame("NODE NAME");
+    m_renameField = new QLineEdit(renameFrame);
+    m_renameField->setPlaceholderText("Enter a new node name");
+    m_renameField->setStyleSheet(m_ipv6Field->styleSheet());
+    renameLay->addWidget(m_renameField);
+    auto *renameRow = new QWidget(renameFrame);
+    auto *renameRowLay = new QHBoxLayout(renameRow);
+    renameRowLay->setContentsMargins(0, 0, 0, 0);
+    renameRowLay->setSpacing(8);
+    auto *renameBtn = makeSideBtn("Rename", renameRow);
+    auto *renameHelp = new QLabel("Name changes probe the network first.", renameRow);
+    renameHelp->setStyleSheet("QLabel { color: #7f889b; font-size: 11px; }");
+    renameRowLay->addWidget(renameBtn);
+    renameRowLay->addWidget(renameHelp, 1);
+    renameLay->addWidget(renameRow);
+    outer->addWidget(renameFrame);
+
+    auto [lookupFrame, lookupLay] = makeFrame("LOOKUP");
+    m_lookupField = new QLineEdit(lookupFrame);
+    m_lookupField->setPlaceholderText("Search service, node, or hidden invite");
+    m_lookupField->setStyleSheet(m_ipv6Field->styleSheet());
+    lookupLay->addWidget(m_lookupField);
+    auto *lookupButtons = new QWidget(lookupFrame);
+    auto *lookupButtonsLay = new QHBoxLayout(lookupButtons);
+    lookupButtonsLay->setContentsMargins(0, 0, 0, 0);
+    lookupButtonsLay->setSpacing(8);
+    auto *serviceBtn = makeSideBtn("Service", lookupButtons);
+    auto *nodeBtn = makeSideBtn("Node", lookupButtons);
+    auto *hiddenBtn = makeSideBtn("Hidden", lookupButtons);
+    lookupButtonsLay->addWidget(serviceBtn);
+    lookupButtonsLay->addWidget(nodeBtn);
+    lookupButtonsLay->addWidget(hiddenBtn);
+    lookupLay->addWidget(lookupButtons);
+    m_lookupResult = new QTextEdit(lookupFrame);
+    m_lookupResult->setReadOnly(true);
+    m_lookupResult->setPlaceholderText("Lookup results appear here…");
+    m_lookupResult->setStyleSheet(
+        "QTextEdit { background: #0e1118; border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 10px; color: #cdd6e6; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; }");
+    m_lookupResult->setMinimumHeight(150);
+    lookupLay->addWidget(m_lookupResult, 1);
+    outer->addWidget(lookupFrame, 1);
+
+    auto [hostFrame, hostLay] = makeFrame("SERVICE HOSTING");
+    m_hostNameField = new QLineEdit(hostFrame);
+    m_hostNameField->setPlaceholderText("Service name");
+    m_hostNameField->setStyleSheet(m_ipv6Field->styleSheet());
+    hostLay->addWidget(m_hostNameField);
+
+    auto *hostRow = new QWidget(hostFrame);
+    auto *hostRowLay = new QHBoxLayout(hostRow);
+    hostRowLay->setContentsMargins(0, 0, 0, 0);
+    hostRowLay->setSpacing(8);
+    m_hostPortField = new QSpinBox(hostRow);
+    m_hostPortField->setRange(1, 65535);
+    m_hostPortField->setValue(8080);
+    m_hostPortField->setStyleSheet(
+        "QSpinBox { background: #0e1118; border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 8px 10px; color: #e8eaf0; }");
+    auto *forwardBtn = makeSideBtn("Forward", hostRow);
+    auto *stopBtn = makeSideBtn("Stop", hostRow);
+    hostRowLay->addWidget(m_hostPortField);
+    hostRowLay->addWidget(forwardBtn);
+    hostRowLay->addWidget(stopBtn);
+    hostLay->addWidget(hostRow);
+    auto *hostHint = new QLabel("Forwards local 127.0.0.1:PORT as a VX6 service. Stop removes it.", hostFrame);
+    hostHint->setWordWrap(true);
+    hostHint->setStyleSheet("QLabel { color: #7f889b; font-size: 11px; }");
+    hostLay->addWidget(hostHint);
+    outer->addWidget(hostFrame);
+
+    auto *spacer = new QWidget(root);
+    spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    outer->addWidget(spacer, 1);
+
+    root->setLayout(outer);
+    scrollArea->setWidget(root);
+    m_controlDock->setWidget(scrollArea);
+    addDockWidget(Qt::LeftDockWidgetArea, m_controlDock);
+
+    connect(copyIpv6, &QPushButton::clicked, this, &BrowserWindow::copyCurrentIpv6);
+    connect(refreshPanel, &QPushButton::clicked, this, &BrowserWindow::refreshControlPanel);
+    connect(initBtn, &QPushButton::clicked, this, &BrowserWindow::initializeNodeFromPanel);
+    connect(connectBtn, &QPushButton::clicked, this, &BrowserWindow::connectServiceFromPanel);
+    connect(renameBtn, &QPushButton::clicked, this, &BrowserWindow::renameNodeFromPanel);
+    connect(serviceBtn, &QPushButton::clicked, this, &BrowserWindow::lookupServiceFromPanel);
+    connect(nodeBtn, &QPushButton::clicked, this, &BrowserWindow::lookupNodeFromPanel);
+    connect(hiddenBtn, &QPushButton::clicked, this, &BrowserWindow::lookupHiddenFromPanel);
+    connect(forwardBtn, &QPushButton::clicked, this, &BrowserWindow::hostServiceFromPanel);
+    connect(stopBtn, &QPushButton::clicked, this, &BrowserWindow::stopHostedServiceFromPanel);
+    connect(browseBtn, &QPushButton::clicked, this, &BrowserWindow::chooseFileFromPanel);
+    connect(sendBtn, &QPushButton::clicked, this, &BrowserWindow::sendFileFromPanel);
+    connect(receiveStatusBtn, &QPushButton::clicked, this, &BrowserWindow::showFileTransferPage);
+    connect(m_toggleReceiveBtn, &QPushButton::clicked, this, &BrowserWindow::toggleReceiveFromPanel);
+    connect(m_lookupField, &QLineEdit::returnPressed, this, &BrowserWindow::lookupServiceFromPanel);
+    connect(m_renameField, &QLineEdit::returnPressed, this, &BrowserWindow::renameNodeFromPanel);
+    connect(m_hostNameField, &QLineEdit::returnPressed, this, &BrowserWindow::hostServiceFromPanel);
+    connect(m_initNodeNameField, &QLineEdit::returnPressed, this, &BrowserWindow::initializeNodeFromPanel);
+    connect(m_connectServiceField, &QLineEdit::returnPressed, this, &BrowserWindow::connectServiceFromPanel);
+    connect(m_sendTargetField, &QLineEdit::returnPressed, this, &BrowserWindow::sendFileFromPanel);
+    connect(m_controlDock, &QDockWidget::visibilityChanged, this, [this](bool visible)
+            {
+                if (visible)
+                    refreshControlPanel();
+            });
+
+    refreshControlPanel();
+}
+
 // side panel dock
 void BrowserWindow::buildDock()
 {
@@ -509,6 +766,7 @@ void BrowserWindow::buildDock()
         "vx6://services",
         "vx6://peers",
         "vx6://identity",
+        "vx6://files",
         "vx6://permissions",
     });
     m_shortcuts->setFocusPolicy(Qt::NoFocus);
@@ -575,6 +833,233 @@ void BrowserWindow::buildDock()
     connect(m_shortcuts, &QListWidget::itemDoubleClicked, this,
             [this](QListWidgetItem *item)
             { navigateTo(item->text(), false); });
+}
+
+void BrowserWindow::refreshControlPanel()
+{
+    const QString ipv6 = m_backend->currentAdvertiseAddr();
+    const QString name = m_backend->currentNodeName();
+    const QString nodeId = m_backend->currentNodeID();
+
+    if (m_ipv6Field) {
+        m_ipv6Field->setText(ipv6.isEmpty() ? QStringLiteral("(not published yet)") : ipv6);
+    }
+    if (m_nodeNameField) {
+        m_nodeNameField->setText(name.isEmpty() ? QStringLiteral("(unnamed)") : name);
+    }
+    if (m_nodeIdField) {
+        m_nodeIdField->setText(nodeId.isEmpty() ? QStringLiteral("(identity unavailable)") : nodeId);
+    }
+    if (m_toggleReceiveBtn) {
+        const bool enabled = m_backend->receiveEnabled();
+        m_toggleReceiveBtn->setText(enabled ? QStringLiteral("Disable Receive") : QStringLiteral("Enable Receive"));
+    }
+}
+
+void BrowserWindow::copyCurrentIpv6()
+{
+    refreshControlPanel();
+    const QString text = m_ipv6Field ? m_ipv6Field->text().trimmed() : QString();
+    if (text.isEmpty() || text.startsWith('(')) {
+        appendLog("no current IPv6 available to copy");
+        return;
+    }
+    QApplication::clipboard()->setText(text);
+    appendLog(QString("copied current IPv6: %1").arg(text));
+}
+
+void BrowserWindow::renameNodeFromPanel()
+{
+    if (!m_renameField) {
+        return;
+    }
+    const QString name = m_renameField->text().trimmed();
+    if (name.isEmpty()) {
+        appendLog("node rename skipped: empty name");
+        return;
+    }
+    appendLog(QString("renaming node to %1…").arg(name));
+    appendLog(m_backend->renameNode(name));
+    refreshControlPanel();
+    refreshStatus();
+    if (currentView()) {
+        currentView()->setUrl(QUrl("vx6://identity"));
+    }
+}
+
+void BrowserWindow::lookupServiceFromPanel()
+{
+    if (!m_lookupField) {
+        return;
+    }
+    const QString query = m_lookupField->text().trimmed();
+    if (query.isEmpty()) {
+        appendLog("service lookup skipped: empty query");
+        return;
+    }
+    appendLog(QString("lookup service: %1").arg(query));
+    const QString result = m_backend->lookupRaw(QStringList{"debug", "dht-get", "--service", query}, "service lookup");
+    if (m_lookupResult) {
+        m_lookupResult->setPlainText(result);
+    }
+    appendLog(result.trimmed());
+    navigateTo(QStringLiteral("vx6://service/%1").arg(QString::fromUtf8(QUrl::toPercentEncoding(query))), false);
+}
+
+void BrowserWindow::lookupNodeFromPanel()
+{
+    if (!m_lookupField) {
+        return;
+    }
+    const QString query = m_lookupField->text().trimmed();
+    if (query.isEmpty()) {
+        appendLog("node lookup skipped: empty query");
+        return;
+    }
+    appendLog(QString("lookup node: %1").arg(query));
+    const QString result = m_backend->lookupRaw(QStringList{"debug", "dht-get", "--node", query}, "node lookup");
+    if (m_lookupResult) {
+        m_lookupResult->setPlainText(result);
+    }
+    appendLog(result.trimmed());
+    navigateTo(QStringLiteral("vx6://node/%1").arg(QString::fromUtf8(QUrl::toPercentEncoding(query))), false);
+}
+
+void BrowserWindow::lookupHiddenFromPanel()
+{
+    if (!m_lookupField) {
+        return;
+    }
+    const QString query = m_lookupField->text().trimmed();
+    if (query.isEmpty()) {
+        appendLog("hidden lookup skipped: empty query");
+        return;
+    }
+    appendLog(QString("lookup hidden service: %1").arg(query));
+    const QString result = m_backend->lookupRaw(QStringList{"debug", "dht-get", "--service", query}, "hidden lookup");
+    if (m_lookupResult) {
+        m_lookupResult->setPlainText(result);
+    }
+    appendLog(result.trimmed());
+    navigateTo(QStringLiteral("vx6://service/%1").arg(QString::fromUtf8(QUrl::toPercentEncoding(query))), false);
+}
+
+void BrowserWindow::hostServiceFromPanel()
+{
+    if (!m_hostNameField || !m_hostPortField) {
+        return;
+    }
+    const QString name = m_hostNameField->text().trimmed();
+    const int port = m_hostPortField->value();
+    if (name.isEmpty()) {
+        appendLog("service hosting skipped: empty service name");
+        return;
+    }
+    appendLog(QString("hosting service %1 on port %2…").arg(name).arg(port));
+    const QString result = m_backend->hostService(name, port);
+    appendLog(result.trimmed());
+    refreshControlPanel();
+    refreshStatus();
+    navigateTo("vx6://services", false);
+}
+
+void BrowserWindow::stopHostedServiceFromPanel()
+{
+    if (!m_hostNameField) {
+        return;
+    }
+    const QString name = m_hostNameField->text().trimmed();
+    if (name.isEmpty()) {
+        appendLog("service stop skipped: empty service name");
+        return;
+    }
+    appendLog(QString("stopping hosted service %1…").arg(name));
+    const QString result = m_backend->stopHostedService(name);
+    appendLog(result.trimmed());
+    refreshControlPanel();
+    refreshStatus();
+    navigateTo("vx6://services", false);
+}
+
+void BrowserWindow::initializeNodeFromPanel()
+{
+    if (!m_initNodeNameField) {
+        return;
+    }
+    const QString name = m_initNodeNameField->text().trimmed();
+    if (name.isEmpty()) {
+        appendLog("node init skipped: empty node name");
+        return;
+    }
+    appendLog(QString("initializing new node as %1…").arg(name));
+    const QString result = m_backend->initializeNode(name);
+    appendLog(result.trimmed());
+    m_initNodeNameField->clear();
+    refreshControlPanel();
+    refreshStatus();
+}
+
+void BrowserWindow::connectServiceFromPanel()
+{
+    if (!m_connectServiceField) {
+        return;
+    }
+    const QString target = m_connectServiceField->text().trimmed();
+    if (target.isEmpty()) {
+        appendLog("connect skipped: empty service name or address");
+        return;
+    }
+    appendLog(QString("connecting to %1…").arg(target));
+    const QString result = m_backend->connectService(target);
+    appendLog(result.trimmed());
+    m_connectServiceField->clear();
+}
+
+void BrowserWindow::chooseFileFromPanel()
+{
+    const QString filePath = QFileDialog::getOpenFileName(this, "Choose file to send", QString(), QStringLiteral("All files (*)"));
+    if (filePath.isEmpty()) {
+        return;
+    }
+    if (m_sendFileField) {
+        m_sendFileField->setText(filePath);
+    }
+}
+
+void BrowserWindow::sendFileFromPanel()
+{
+    if (!m_sendFileField || !m_sendTargetField) {
+        return;
+    }
+    const QString filePath = m_sendFileField->text().trimmed();
+    const QString target = m_sendTargetField->text().trimmed();
+    if (filePath.isEmpty()) {
+        appendLog("send file skipped: no file selected");
+        return;
+    }
+    if (target.isEmpty()) {
+        appendLog("send file skipped: no receiver specified");
+        return;
+    }
+    appendLog(QString("sending file %1 to %2…").arg(filePath, target));
+    const QString result = m_backend->sendFile(filePath, target);
+    appendLog(result.trimmed());
+}
+
+void BrowserWindow::toggleReceiveFromPanel()
+{
+    if (!m_toggleReceiveBtn) {
+        return;
+    }
+    const bool enabled = m_backend->receiveEnabled();
+    const QString result = m_backend->toggleReceive(!enabled);
+    appendLog(result.trimmed());
+    refreshControlPanel();
+}
+
+void BrowserWindow::showFileTransferPage()
+{
+    navigateTo("vx6://files", false);
 }
 
 // backend callbacks

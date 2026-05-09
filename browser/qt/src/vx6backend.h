@@ -27,14 +27,33 @@ public:
     QString peersPageHtml() const;
     QString identityPageHtml() const;
     QString lookupPageHtml(const QString &title, const QStringList &args, const QString &subtitle) const;
+    QString currentNodeName() const;
+    QString currentNodeID() const;
+    QString currentAdvertiseAddr() const;
+    QString sendFile(const QString &filePath, const QString &target, bool proxy = false);
+    QString receiveStatus() const;
+    bool receiveEnabled() const;
+    QString toggleReceive(bool enable);
+    QString filesPageHtml() const;
 
     bool nodeRunning() const;
+    QString currentDownloadPath() const;
+    QString downloadedFilesHtml(const QString &downloadDir) const;
     QString startNode();
     QString stopNode();
+    QString renameNode(const QString &name);
+    QString initializeNode(const QString &name);
+    QString connectService(const QString &target);
+    QString hostService(const QString &serviceName, int port);
+    QString stopHostedService(const QString &serviceName);
+    QString lookupRaw(const QStringList &args, const QString &label) const;
 
     QString runVX6(const QStringList &args, bool *ok = nullptr) const;
     QString resolveConfigPath() const;
     QString resolveBinaryPath() const;
+    
+    bool vx6BinaryExists() const;
+    QString ensureVx6Binary();
 
 signals:
     void logLine(const QString &line) const;
@@ -42,12 +61,15 @@ signals:
 private:
     void appendProcessOutput();
     void updateNodeState();
+    QString statusValue(const QString &key) const;
 
     QString makePageShell(const QString &title, const QString &headline, const QString &body, const QString &accent) const;
     QString dashboardCard(const QString &href, const QString &title, const QString &description, const QString &accent) const;
     QString commandBlock(const QString &output) const;
     QString browserHintBlock() const;
     QString osNoticeBlock() const;
+    
+    bool waitForProcessFinished(QProcess &proc, int msecs) const;
 
     QString m_vx6Binary;
     QString m_configPath;

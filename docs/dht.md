@@ -14,11 +14,18 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 
 - multi-source lookup confirmation
 - conflict detection
+- conflict candidate reporting for same-name lookups
+- interactive user choice support in the CLI when multiple candidates are returned
 - bounded replication
+- adaptive replication target under churn/failure pressure
 - refresh tracking
 - conservative store admission with signed trusted writes, authoritative publisher checks, stale-write rejection, and per-source throttling
 - ASN-aware diversity when a local ASN map is present
-- hidden descriptor caching and cover lookups
+- hidden descriptor caching, jittered refresh polling, and background cover lookups
+- tracked hidden-invite warmers to reduce purely on-demand lookup patterns
+- scheduled privacy traffic buckets (time-sliced baseline hidden descriptor cover activity)
+- anomaly-driven cover escalation (higher hidden cover load when lookup instability or consensus failures rise)
+- multi-group hidden descriptor consensus before acceptance
 - blinded rotating hidden keys
 - encrypted hidden descriptor payloads
 
@@ -41,6 +48,25 @@ Hidden descriptors are stronger than plain alias lookup because:
 Still, the responsible DHT holders can observe timing and volume on a blinded descriptor key. That is one of the main remaining privacy limits.
 
 VX6 reduces the obvious alias leak, but it does not hide all metadata from a powerful observer yet.
+
+## WAN/Churn Adaptation
+
+The DHT now adjusts lookup and replication behavior from live lookup failure signals:
+
+- lookup fanout (`alpha`) increases when recent failures rise
+- lookup query budget (`beta`-style budget) increases under churn
+- replication target increases under churn to keep availability stable
+
+This reduces timeout risk in unstable WAN conditions without permanently paying high bandwidth cost in healthy periods.
+
+## Adversarial Test Harness
+
+The DHT package includes CI-safe adversarial tests for:
+
+- hidden cover escalation behavior under anomaly pressure
+- hidden descriptor consensus threshold behavior across independent groups
+
+These tests are intended to catch security-regression drift early without requiring privileged socket setup.
 
 ## ASN Diversity
 
@@ -70,3 +96,18 @@ That means:
 - repeat writes from the same source are rate limited
 
 This keeps the DHT from accepting arbitrary trusted writes just because they are signed.
+
+## Name Conflicts
+
+VX6 treats the node keypair and NodeID as the real identity.
+
+If two different nodes try to use the same human-readable node name:
+
+- the shared registry rejects the second publisher
+- DHT lookup can report every conflicting candidate instead of silently picking one
+- the CLI can show the full set of candidates and let the user choose which identity is correct
+- each running node periodically checks its own name key and logs a clash warning if another identity claims the same name
+
+This is intentional. Human names are labels. NodeID is the identity.
+
+At init time and during explicit rename, VX6 can also wait and probe the network before accepting a name. If another identity is already using that name, the CLI stops and shows the candidates instead of silently taking over the name.
